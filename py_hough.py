@@ -77,7 +77,6 @@ def _probabilistic_hough_line(img, threshold,
     mask = \
         np.zeros((height, width), dtype=np.uint8)
     line_ends = np.zeros((2, 2), dtype=np.intp)
-    shift = 16
     nlines = 0
     lines_max = 2 ** 15  # maximum line number cutoff.
     lines = np.zeros((lines_max, 2, 2),
@@ -107,136 +106,72 @@ def _probabilistic_hough_line(img, threshold,
     rand_idxs = np.arange(len(x_idxs), dtype=np.intp)
     rng.shuffle(rand_idxs)
 
-    if True:
-        for pt_no, idx in enumerate(rand_idxs):  # Select random non-zero point (step 1 above).
-            x = x_idxs[idx]
-            y = y_idxs[idx]
-            vprint('xy', x, y)
+    for pt_no, idx in enumerate(rand_idxs):  # Select random non-zero point (step 1 above).
+        x = x_idxs[idx]
+        y = y_idxs[idx]
+        vprint('xy', x, y)
 
-            # Skip if previously eliminated by detection in earlier line
-            # search.
-            if not mask[y, x]:
-                vprint('Mask empty at xy')
-                continue
+        # Skip if previously eliminated by detection in earlier line
+        # search.
+        if not mask[y, x]:
+            vprint('Mask empty at xy')
+            continue
 
-            value = 0
-            max_value = 0  # Max value in accumulator, start value.
-            max_theta_idx = -1  # Index into {c,s}theta arrays, start value.
+        value = 0
+        max_value = 0  # Max value in accumulator, start value.
+        max_theta_idx = -1  # Index into {c,s}theta arrays, start value.
 
-            # Apply Hough transform on point (step 2 above).
-            for j in range(nthetas):
-                rho = ctheta[j] * x + stheta[j] * y
+        # Apply Hough transform on point (step 2 above).
+        for j in range(nthetas):
+            rho = ctheta[j] * x + stheta[j] * y
+            rho_idx = round(rho) + rho_idx_offset
+            accum[rho_idx, j] += 1
+            value = accum[rho_idx, j]
+            if value > max_value:
+                max_value = value
+                max_theta_idx = j
+                max_rho_idx = rho_idx
+        if max_value < threshold:  # Step 4 above.
+            vprint('Threshold not passed')
+            continue
+
+        if np.sum(accum == max_value) > 1:
+            vprint('Multiple maxima in accum')
+
+        lc = ctheta[max_theta_idx]
+        ls = stheta[max_theta_idx]
+        n_line_pixels = find_line2(x, y, mask, ls, lc, line_ends,
+                                   line_pixels, line_gap, vprint)
+
+        # Confirm line length is sufficient.
+        x_len = line_ends[1, 0] - line_ends[0, 0]
+        y_len = line_ends[1, 1] - line_ends[0, 1]
+        LL = sqrt(x_len * x_len + y_len * y_len)
+        if not LL  >= line_length:
+            vprint(f'Not long enough at {LL}')
+            continue
+
+        vprint(f'Clearing line len {LL}')
+        vprint("Line points", line_pixels[:n_line_pixels])
+        vprint("theta", theta[max_theta_idx])
+        # Pass 2: reset accumulator and mask for points on line (steps 6
+        # and 7 above).
+        for i in range(n_line_pixels):
+            x1 = line_pixels[i, 0]
+            y1 = line_pixels[i, 1]
+            # if not mask[y1, x1]:
+            #    continue
+            mask[y1, x1] = 0  # Remove point.
+            for j in range(nthetas):  # Remove accumulator votes.
+                rho = ctheta[j] * x1 + stheta[j] * y1
                 rho_idx = round(rho) + rho_idx_offset
-                accum[rho_idx, j] += 1
-                value = accum[rho_idx, j]
-                if value > max_value:
-                    max_value = value
-                    max_theta_idx = j
-                    max_rho_idx = rho_idx
-            if max_value < threshold:  # Step 4 above.
-                vprint('Threshold not passed')
-                continue
+                accum[rho_idx, j] -= 1
 
-            if np.sum(accum == max_value) > 1:
-                vprint('Multiple maxima in accum')
-
-            # From the random point (x, y), walk in opposite directions and
-            # find line beginning and end (step 5 above).
-            line_sin = stheta[max_theta_idx]
-            line_cos = ctheta[max_theta_idx]
-            # Rearranging sin theta x + cos theta y = r, slope is -sin theta /
-            # cos theta
-            mls = -line_sin
-            lc = line_cos
-            slope = mls / lc
-            xflag = fabs(slope) > 1
-            x0 = x  # Coordinate shift 16 if abs(slope) > 1 False else x
-            y0 = y  # Coordinate shift 16 if abs(slope) > 1 True else y
-            # calculate gradient of walks using fixed point math
-            d = 2 ** shift
-            if xflag:  # abs(y) increases faster than abs(x).
-                if mls > 0:
-                    dx0 = 1
-                else:
-                    dx0 = -1
-                # y0, dy0 shifted.  Push value into upper bits.
-                dy0 = round(lc * (1 << shift) / fabs(mls))
-                y0 = (y0 << shift) + (1 << (shift - 1))
-                vprint('Slope, dx, dy', slope, dx0, dy0 / d)
-            else:  # abs(x) increases faster than abs(x).
-                if lc > 0:
-                    dy0 = 1
-                else:
-                    dy0 = -1
-                # x0, dx0 shifted.  Push value into upper bits.
-                dx0 = round(mls * (1 << shift) / fabs(lc))
-                x0 = (x0 << shift) + (1 << (shift - 1))
-                vprint('Slope, dx, dy', slope, dx0 / d, dy0)
-            # pass 1: walk the line, merging lines less than specified gap
-            # length (step 5 continued).
-            n_line_pixels = 0
-            for k in range(2):
-                gap = 0
-                px = x0
-                py = y0
-                dx = dx0
-                dy = dy0
-                if k > 0:  # Walk in opposite direction.
-                    dx = -dx
-                    dy = -dy
-                while True:
-                    if xflag:
-                        x1 = px
-                        y1 = py >> shift  # Pull value from upper bits.
-                    else:
-                        x1 = px >> shift
-                        y1 = py
-                    # check when line exits image boundary
-                    if x1 < 0 or x1 >= width or y1 < 0 or y1 >= height:
-                        break
-                    gap += 1
-                    if mask[y1, x1]:  # Hit remaining pixel, continue line.
-                        gap = 0
-                        line_ends[k, 0] = x1
-                        line_ends[k, 1] = y1
-                        # Record presence of in-mask pixel on line.
-                        line_pixels[n_line_pixels, 0] = x1
-                        line_pixels[n_line_pixels, 1] = y1
-                        n_line_pixels += 1
-                    elif gap > line_gap:  # Gap to here too large, end line.
-                        break
-                    px += dx
-                    py += dy
-
-            # Confirm line length is sufficient.
-            x_len = line_ends[1, 0] - line_ends[0, 0]
-            y_len = line_ends[1, 1] - line_ends[0, 1]
-            LL = sqrt(x_len * x_len + y_len * y_len)
-            if not LL  >= line_length:
-                vprint(f'Not long enough at {LL}')
-                continue
-
-            vprint(f'Clearing line len {LL}')
-            vprint("Line points", line_pixels[:n_line_pixels])
-            vprint("theta", theta[max_theta_idx])
-            # Pass 2: reset accumulator and mask for points on line (steps 6
-            # and 7 above).
-            for i in range(n_line_pixels):
-                x1 = line_pixels[i, 0]
-                y1 = line_pixels[i, 1]
-                if not mask[y1, x1]:
-                    continue
-                mask[y1, x1] = 0  # Remove point.
-                for j in range(nthetas):  # Remove accumulator votes.
-                    rho = ctheta[j] * x1 + stheta[j] * y1
-                    rho_idx = round(rho) + rho_idx_offset
-                    accum[rho_idx, j] -= 1
-
-            # Add line to the result (step 8 above).
-            lines[nlines] = line_ends
-            nlines += 1
-            if nlines >= lines_max:
-                break
+        # Add line to the result (step 8 above).
+        lines[nlines] = line_ends
+        nlines += 1
+        if nlines >= lines_max:
+            break
 
     return ([((line[0, 0], line[0, 1]), (line[1, 0], line[1, 1]))
             for line in lines[:nlines]],
@@ -244,3 +179,128 @@ def _probabilistic_hough_line(img, threshold,
             rho_idx_offset,
             theta[max_theta_idx]
            )
+
+
+def find_line(x, y, mask, ls, lc, line_ends, line_pixels, line_gap,
+              vprint):
+
+    height = mask.shape[0]
+    width = mask.shape[1]
+
+    # From the random point (x, y), walk in opposite directions and
+    # find line beginning and end (step 5 above).
+    shift = 16
+    # Line equation is r = cos theta x + sin theta y.  Rearranging:
+    # y = r / sin theta  - cos theta x / sin theta, and slope
+    # is -cos theta / sin theta .
+    mls = -ls
+    slope = mls / lc
+    xflag = fabs(slope) > 1
+    x0 = x  # Coordinate shift 16 if abs(slope) > 1 False else x
+    y0 = y  # Coordinate shift 16 if abs(slope) > 1 True else y
+    # calculate gradient of walks using fixed point math
+    if xflag:  # abs(y) increases faster than abs(x).
+        if mls > 0:
+            dx0 = 1
+        else:
+            dx0 = -1
+        # y0, dy0 shifted.  Push value into upper bits.
+        dy0 = round(lc * (1 << shift) / fabs(mls))
+        y0 = (y0 << shift) + (1 << (shift - 1))
+        vprint('Slope, dx, dy', slope, dx0, dy0 / d)
+    else:  # abs(x) increases faster than abs(x).
+        if lc > 0:
+            dy0 = 1
+        else:
+            dy0 = -1
+        # x0, dx0 shifted.  Push value into upper bits.
+        dx0 = round(mls * (1 << shift) / fabs(lc))
+        x0 = (x0 << shift) + (1 << (shift - 1))
+        vprint('Slope, dx, dy', slope, dx0 / d, dy0)
+    # pass 1: walk the line, merging lines less than specified gap
+    # length (step 5 continued).
+    n_line_pixels = 0
+    for k in range(2):
+        gap = 0
+        px = x0
+        py = y0
+        dx = dx0
+        dy = dy0
+        if k > 0:  # Walk in opposite direction.
+            dx = -dx
+            dy = -dy
+        while True:
+            if xflag:
+                x1 = px
+                y1 = py >> shift  # Pull value from upper bits.
+            else:
+                x1 = px >> shift
+                y1 = py
+            # check when line exits image boundary
+            if x1 < 0 or x1 >= width or y1 < 0 or y1 >= height:
+                break
+            gap += 1
+            if mask[y1, x1]:  # Hit remaining pixel, continue line.
+                gap = 0
+                line_ends[k, 0] = x1
+                line_ends[k, 1] = y1
+                # Record presence of in-mask pixel on line.
+                line_pixels[n_line_pixels, 0] = x1
+                line_pixels[n_line_pixels, 1] = y1
+                n_line_pixels += 1
+            elif gap > line_gap:  # Gap to here too large, end line.
+                break
+            px += dx
+            py += dy
+    return n_line_pixels
+
+
+def find_line2(x, y, mask, ls, lc, line_ends, line_pixels, line_gap,
+               vprint):
+
+    height = mask.shape[0]
+    width = mask.shape[1]
+
+    # From the random point (x, y), walk in opposite directions and
+    # find line beginning and end (step 5 above).
+    # Line equation is r = cos theta x + sin theta y.  Rearranging:
+    # y = r / sin theta  - cos theta x / sin theta, and slope
+    # is -cos theta / sin theta .
+    slope = -lc / ls if ls else 99  # Marker value.
+    sl_lt_1 = abs(slope) < 1
+    if sl_lt_1:  # One of sin theta or cos theta must be non-zero.
+        slope = ls / -lc
+    # pass 1: walk the line, merging lines less than specified gap
+    # length (step 5 continued).
+    line_pixels[0, 0] = x
+    line_pixels[0, 0] = y
+    n_line_pixels = 1
+    for k in range(2):
+        gap = 0
+        px = x
+        py = y
+        delta = -1 if k else 1
+        offset = delta
+        while True:
+            if sl_lt_1:
+                px = x + offset
+                py = y + round(offset * slope)
+            else:
+                py = y + offset
+                px = x + round(offset * slope)
+            # check when line exits image boundary
+            if px < 0 or px >= width or py < 0 or py >= height:
+                break
+            gap += 1
+            if mask[py, px]:  # Hit remaining pixel, continue line.
+                gap = 0
+                line_ends[k, 0] = px
+                line_ends[k, 1] = py
+                # Record presence of in-mask pixel on line.
+                line_pixels[n_line_pixels, 0] = px
+                line_pixels[n_line_pixels, 1] = py
+                n_line_pixels += 1
+            elif gap > line_gap:  # Gap to here too large, end line.
+                break
+            offset += delta
+    return n_line_pixels

@@ -38,13 +38,23 @@ threshold = 10
 line_length = L - 1
 line_gap = 2
 
-# image = ski.data.camera()
-# more = ski.feature.canny(image, 2, 1, 25)
-# line_length = 5
+image = ski.data.camera()
+more = ski.feature.canny(image, 2, 1, 25)
+line_length = 5
 
 theta = np.linspace(-np.pi / 2, np.pi / 2, 180, endpoint=False)
 
-seed = 88
+seed = 89
+
+def func():
+    return   _ph(more,
+                 threshold=threshold,
+                 line_length=line_length,
+                 line_gap=line_gap,
+                 theta=theta,
+                 rng=seed,
+                 verbose=False)
+
 # for seed in range(100):
 if True:
     lines, mro, mx_rho, mx_theta = _ph(more,
@@ -53,7 +63,7 @@ if True:
                                        line_gap=line_gap,
                                        theta=theta,
                                        rng=seed,
-                                       verbose=True)
+                                       verbose=False)
     print('rho', mx_rho, 'theta', mx_theta, mro)
     if not sl(lines) == diags:
         print('Error at', seed)
